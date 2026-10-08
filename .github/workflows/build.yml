@@ -1,0 +1,349 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Create project
+        run: |
+          mkdir -p app
+          cat > app/build.gradle <<'EOF_0'
+          plugins { id 'com.android.application' }
+
+          android {
+              namespace 'com.example.volbuttons'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.example.volbuttons'
+                  minSdk 24
+                  targetSdk 33
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          EOF_0
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_1'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+
+              <application
+                  android:label="أزرار الصوت"
+                  android:theme="@android:style/Theme.Translucent.NoTitleBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".OverlayService" android:exported="false"/>
+                  <receiver android:name=".BootReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                      </intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          EOF_1
+          mkdir -p app/src/main/java/com/example/volbuttons
+          cat > app/src/main/java/com/example/volbuttons/BootReceiver.java <<'EOF_2'
+          package com.example.volbuttons;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.os.Build;
+          import android.provider.Settings;
+
+          public class BootReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context c, Intent in) {
+                  if (!Settings.canDrawOverlays(c)) return;
+                  Intent i = new Intent(c, OverlayService.class);
+                  try {
+                      if (Build.VERSION.SDK_INT >= 26) c.startForegroundService(i); else c.startService(i);
+                  } catch (Exception ignored) { }
+              }
+          }
+          EOF_2
+          mkdir -p app/src/main/java/com/example/volbuttons
+          cat > app/src/main/java/com/example/volbuttons/MainActivity.java <<'EOF_3'
+          package com.example.volbuttons;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.widget.Toast;
+
+          public class MainActivity extends Activity {
+              private boolean ready = false;
+              private boolean asked = false;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  if (Build.VERSION.SDK_INT >= 33
+                          && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                          != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
+                  } else {
+                      ready = true;
+                  }
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int c, String[] p, int[] r) {
+                  ready = true;
+                  check();
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  if (ready) check();
+              }
+
+              private void check() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      if (!asked) {
+                          asked = true;
+                          Toast.makeText(this, "فعّل \"السماح بالعرض فوق التطبيقات\" لأزرار الصوت", Toast.LENGTH_LONG).show();
+                          startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                  Uri.parse("package:" + getPackageName())));
+                      } else {
+                          finish();
+                      }
+                      return;
+                  }
+                  Intent i = new Intent(this, OverlayService.class);
+                  if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+                  finish();
+              }
+          }
+          EOF_3
+          mkdir -p app/src/main/java/com/example/volbuttons
+          cat > app/src/main/java/com/example/volbuttons/OverlayService.java <<'EOF_4'
+          package com.example.volbuttons;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.graphics.PixelFormat;
+          import android.graphics.drawable.GradientDrawable;
+          import android.media.AudioManager;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          public class OverlayService extends Service {
+              private static final String CHANNEL = "vol_overlay";
+              private WindowManager wm;
+              private AudioManager am;
+              private View root;
+              private final Handler handler = new Handler(Looper.getMainLooper());
+
+              @Override
+              public IBinder onBind(Intent i) { return null; }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  if (intent != null && "STOP".equals(intent.getAction())) {
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+                  startForeground(1, buildNotification());
+                  if (root == null) addOverlay();
+                  return START_STICKY;
+              }
+
+              @Override
+              public void onDestroy() {
+                  if (root != null && wm != null) {
+                      try { wm.removeView(root); } catch (Exception ignored) { }
+                      root = null;
+                  }
+                  super.onDestroy();
+              }
+
+              private Notification buildNotification() {
+                  NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      nm.createNotificationChannel(new NotificationChannel(CHANNEL, "أزرار الصوت",
+                              NotificationManager.IMPORTANCE_MIN));
+                  }
+                  Intent stop = new Intent(this, OverlayService.class).setAction("STOP");
+                  int fl = Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0;
+                  PendingIntent pi = PendingIntent.getService(this, 0, stop, fl);
+                  Notification.Builder nb = Build.VERSION.SDK_INT >= 26
+                          ? new Notification.Builder(this, CHANNEL) : new Notification.Builder(this);
+                  return nb.setSmallIcon(android.R.drawable.ic_lock_silent_mode_off)
+                          .setContentTitle("أزرار الصوت شغالة")
+                          .setContentText("اضغط هنا لإيقافها")
+                          .setContentIntent(pi)
+                          .setOngoing(true)
+                          .build();
+              }
+
+              private int dp(int v) {
+                  return (int) (v * getResources().getDisplayMetrics().density);
+              }
+
+              private TextView makeButton(String text, int sizeDp) {
+                  TextView t = new TextView(this);
+                  t.setText(text);
+                  t.setTextColor(Color.WHITE);
+                  t.setTextSize(26);
+                  t.setGravity(Gravity.CENTER);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(0xCC222222);
+                  bg.setCornerRadius(dp(14));
+                  t.setBackground(bg);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp));
+                  lp.setMargins(0, dp(3), 0, dp(3));
+                  t.setLayoutParams(lp);
+                  return t;
+              }
+
+              private void addOverlay() {
+                  wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+                  am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+
+                  LinearLayout box = new LinearLayout(this);
+                  box.setOrientation(LinearLayout.VERTICAL);
+                  box.setGravity(Gravity.CENTER_HORIZONTAL);
+
+                  TextView up = makeButton("▲", 56);
+                  TextView handle = makeButton("≡", 36);
+                  TextView down = makeButton("▼", 56);
+                  box.addView(up);
+                  box.addView(handle);
+                  box.addView(down);
+
+                  int type = Build.VERSION.SDK_INT >= 26
+                          ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                          : WindowManager.LayoutParams.TYPE_PHONE;
+                  final WindowManager.LayoutParams p = new WindowManager.LayoutParams(
+                          WindowManager.LayoutParams.WRAP_CONTENT,
+                          WindowManager.LayoutParams.WRAP_CONTENT,
+                          type,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                  | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                          PixelFormat.TRANSLUCENT);
+                  p.gravity = Gravity.TOP | Gravity.START;
+                  p.x = 0;
+                  p.y = dp(200);
+
+                  setupRepeat(up, AudioManager.ADJUST_RAISE);
+                  setupRepeat(down, AudioManager.ADJUST_LOWER);
+
+                  handle.setOnTouchListener(new View.OnTouchListener() {
+                      float startX, startY;
+                      int origX, origY;
+                      @Override
+                      public boolean onTouch(View v, MotionEvent e) {
+                          switch (e.getAction()) {
+                              case MotionEvent.ACTION_DOWN:
+                                  startX = e.getRawX(); startY = e.getRawY();
+                                  origX = p.x; origY = p.y;
+                                  return true;
+                              case MotionEvent.ACTION_MOVE:
+                                  p.x = origX + (int) (e.getRawX() - startX);
+                                  p.y = origY + (int) (e.getRawY() - startY);
+                                  wm.updateViewLayout(root, p);
+                                  return true;
+                          }
+                          return true;
+                      }
+                  });
+
+                  root = box;
+                  wm.addView(root, p);
+              }
+
+              private void setupRepeat(View v, final int direction) {
+                  final Runnable[] r = new Runnable[1];
+                  r[0] = new Runnable() {
+                      @Override
+                      public void run() {
+                          am.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI);
+                          handler.postDelayed(r[0], 200);
+                      }
+                  };
+                  v.setOnTouchListener(new View.OnTouchListener() {
+                      @Override
+                      public boolean onTouch(View view, MotionEvent e) {
+                          switch (e.getAction()) {
+                              case MotionEvent.ACTION_DOWN:
+                                  am.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI);
+                                  handler.postDelayed(r[0], 500);
+                                  return true;
+                              case MotionEvent.ACTION_UP:
+                              case MotionEvent.ACTION_CANCEL:
+                                  handler.removeCallbacks(r[0]);
+                                  return true;
+                          }
+                          return true;
+                      }
+                  });
+              }
+          }
+          EOF_4
+          cat > build.gradle <<'EOF_5'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF_5
+          cat > gradle.properties <<'EOF_6'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          EOF_6
+          cat > settings.gradle <<'EOF_7'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "VolumeButtons"
+          include ':app'
+          EOF_7
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VolumeButtons-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
